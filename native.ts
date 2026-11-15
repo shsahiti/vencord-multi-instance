@@ -181,25 +181,23 @@ export function openAccountWindow(_: IpcMainInvokeEvent, name: string) {
  */
 const ZOOM_MIN = -3, ZOOM_MAX = 5, ZOOM_STEP = 0.5;
 
-function hasSetter(obj: object, prop: string) {
-    for (let o: object | null = obj; o; o = Object.getPrototypeOf(o)) {
-        const desc = Object.getOwnPropertyDescriptor(o, prop);
-        if (desc) return typeof desc.set === "function";
-    }
-    return false;
-}
-
 /**
- * Discord's Electron (44) doesn't expose webContents.setZoomLevel, so use whatever zoom API this build has,
- * falling back to CSS zoom on the page, which works everywhere.
+ * Discord's Electron (44) has no working native zoom on webContents: setZoomLevel is missing and the zoomLevel
+ * property setter just calls it and throws. Try the native methods defensively (an uncaught throw here pops a
+ * main-process error dialog), otherwise use CSS zoom on the page, which works everywhere.
  */
 function setZoom(wc: Electron.WebContents, level: number) {
     const anyWc = wc as any;
-    if (typeof anyWc.setZoomLevel === "function") return anyWc.setZoomLevel(level);
-    if (hasSetter(wc, "zoomLevel")) return void (anyWc.zoomLevel = level);
-    if (typeof anyWc.setZoomFactor === "function") return anyWc.setZoomFactor(Math.pow(1.2, level));
-
     const factor = Math.pow(1.2, level);
+    const attempts: Array<() => void> = [
+        () => anyWc.setZoomLevel(level),
+        () => anyWc.setZoomFactor(factor)
+    ];
+    for (const attempt of attempts) {
+        try { attempt(); return; } catch { }
+    }
+
+    if (wc.isDestroyed()) return;
     wc.executeJavaScript(`document.documentElement.style.zoom = ${JSON.stringify(String(factor))}`).catch(() => { });
 }
 
