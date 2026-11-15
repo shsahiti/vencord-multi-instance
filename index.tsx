@@ -16,13 +16,13 @@ function parseProfiles(value: string) {
 }
 
 async function launch(name: string) {
-    const res = await Native.launchProfile(name);
+    const res = await Native.launchProfile(name, settings.store.lowMemoryMode);
     if (res.ok) showToast({ text: `Launching profile "${name}"...`, variant: "success" });
     else showToast({ text: res.error ?? "Failed to launch", variant: "critical" });
 }
 
 async function copyShortcut(name: string) {
-    await copyToClipboard(await Native.getShortcutInfo(name));
+    await copyToClipboard(await Native.getShortcutInfo(name, settings.store.lowMemoryMode));
     showToast({ text: "Shortcut command copied", variant: "success" });
 }
 
@@ -72,6 +72,11 @@ const settings = definePluginSettings({
         type: OptionType.COMPONENT,
         description: "Launch profiles",
         component: ProfileLauncher
+    },
+    lowMemoryMode: {
+        type: OptionType.BOOLEAN,
+        description: "Launch profiles in low-memory mode (no GPU acceleration, leaner Chromium/V8). Re-copy shortcuts after changing this.",
+        default: true
     },
     showProfileInTitle: {
         type: OptionType.BOOLEAN,

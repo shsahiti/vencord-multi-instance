@@ -16,6 +16,8 @@ import { mkdirSync } from "fs";
 import { basename, join, relative } from "path";
 
 const FLAG = "--vc-profile=";
+// Opt out of low-memory mode for a profile (e.g. one you stream from)
+const FULL_FLAG = "--vc-full";
 const PROFILE_NAME = /^[\w-]{1,32}$/;
 
 function profileRoot(name: string) {
@@ -46,13 +48,41 @@ if (currentProfile) {
 
     // Apply immediately so the single instance lock is taken on the profile's directory
     app.setPath("userData", join(root, basename(app.getPath("userData"))));
+
+    if (!process.argv.includes(FULL_FLAG)) applyLowMemoryMode();
+}
+
+/**
+ * Every profile is a full extra Discord (browser + GPU + renderer processes), so trim what Chromium and V8
+ * allocate. This has to run before the app is ready, which it does since this file loads before Discord's code.
+ */
+function applyLowMemoryMode() {
+    // No GPU compositing: drops most of the GPU process's memory (screen share/video get a bit choppier)
+    app.disableHardwareAcceleration();
+
+    const sw = (name: string, value?: string) => app.commandLine.appendSwitch(name, value);
+    // Chromium's low-RAM profile: smaller caches, more aggressive discarding
+    sw("enable-low-end-device-mode");
+    // Have V8 favour a small heap over speed and collect more eagerly
+    sw("js-flags", "--optimize-for-size --memory-reducer");
+    // Don't keep a warm spare renderer around, and share renderers instead of spawning new ones
+    sw("disable-features", "SpareRendererForSitePerProcess,CalculateNativeWinOcclusion,HardwareMediaKeyHandling,MediaSessionService");
+    sw("renderer-process-limit", "1");
+    sw("process-per-site");
+    // Unused in Discord but still spun up per instance
+    sw("disable-speech-api");
+    sw("disable-gpu-shader-disk-cache");
 }
 
 export function getCurrentProfile(_: IpcMainInvokeEvent) {
     return currentProfile;
 }
 
-export function launchProfile(_: IpcMainInvokeEvent, name: string) {
+function profileArgs(name: string, lowMemory: boolean) {
+    return lowMemory ? [`${FLAG}${name}`] : [`${FLAG}${name}`, FULL_FLAG];
+}
+
+export function launchProfile(_: IpcMainInvokeEvent, name: string, lowMemory = true) {
     name = name.trim();
     if (!PROFILE_NAME.test(name))
         return { ok: false, error: "Profile names may only contain letters, numbers, - and _ (max 32 chars)." };
@@ -63,7 +93,7 @@ export function launchProfile(_: IpcMainInvokeEvent, name: string) {
     delete env.ELECTRON_RUN_AS_NODE;
 
     try {
-        const child = spawn(process.execPath, [`${FLAG}${name}`], { detached: true, stdio: "ignore", env });
+        const child = spawn(process.execPath, profileArgs(name, lowMemory), { detached: true, stdio: "ignore", env });
         child.unref();
         return { ok: true };
     } catch (e) {
@@ -71,11 +101,12 @@ export function launchProfile(_: IpcMainInvokeEvent, name: string) {
     }
 }
 
-export function getShortcutInfo(_: IpcMainInvokeEvent, name: string) {
+export function getShortcutInfo(_: IpcMainInvokeEvent, name: string, lowMemory = true) {
+    const args = profileArgs(name, lowMemory).join(" ");
     if (process.platform === "win32") {
         // Discord.exe lives in app-<version>\, so point shortcuts at Update.exe to survive updates
         const updateExe = join(process.execPath, "..", "..", "Update.exe");
-        return `"${updateExe}" --processStart Discord.exe --process-start-args "${FLAG}${name}"`;
+        return `"${updateExe}" --processStart Discord.exe --process-start-args "${args}"`;
     }
-    return `"${process.execPath}" ${FLAG}${name}`;
+    return `"${process.execPath}" ${args}`;
 }
