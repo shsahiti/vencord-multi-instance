@@ -11,8 +11,8 @@
  */
 
 import { spawn } from "child_process";
-import { app, IpcMainInvokeEvent } from "electron";
-import { mkdirSync } from "fs";
+import { app, BrowserWindow, IpcMainInvokeEvent, session, shell } from "electron";
+import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join, relative } from "path";
 
 const FLAG = "--vc-profile=";
@@ -99,6 +99,117 @@ export function launchProfile(_: IpcMainInvokeEvent, name: string, lowMemory = t
     } catch (e) {
         return { ok: false, error: String(e) };
     }
+}
+
+/*
+ * Lightweight alternative to a second instance: open the account as a window inside THIS Discord, running the
+ * Discord web client in its own isolated session (separate cookies/storage = separate login). It shares this
+ * instance's main, GPU and network processes, so it only costs one extra renderer instead of a whole Discord.
+ */
+const accountWindows = new Map<string, BrowserWindow>();
+const ALLOWED_PERMISSIONS = new Set(["notifications", "media", "clipboard-sanitized-write", "fullscreen", "display-capture"]);
+const DISCORD_HOST = /^([\w-]+\.)?discord(app)?\.com$/;
+
+function accountSession(name: string) {
+    const ses = session.fromPartition(`persist:vc-account-${name}`);
+    // Look like plain Chrome: with Electron's UA the web client assumes it's the desktop app and breaks
+    ses.setUserAgent(app.userAgentFallback.replace(/\s(Electron|discord)\/\S+/gi, ""));
+    ses.setPermissionRequestHandler((_wc, permission, cb) => cb(ALLOWED_PERMISSIONS.has(permission)));
+    return ses;
+}
+
+export function openAccountWindow(_: IpcMainInvokeEvent, name: string) {
+    name = name.trim();
+    if (!PROFILE_NAME.test(name))
+        return { ok: false, error: "Profile names may only contain letters, numbers, - and _ (max 32 chars)." };
+
+    const existing = accountWindows.get(name);
+    if (existing && !existing.isDestroyed()) {
+        if (existing.isMinimized()) existing.restore();
+        existing.focus();
+        return { ok: true };
+    }
+
+    const title = `[${name}] Discord`;
+    const win = new BrowserWindow({
+        title,
+        width: 1100,
+        height: 750,
+        autoHideMenuBar: true,
+        backgroundColor: "#313338",
+        webPreferences: {
+            session: accountSession(name),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: false,
+            backgroundThrottling: true
+        }
+    });
+    accountWindows.set(name, win);
+
+    win.on("page-title-updated", e => {
+        e.preventDefault();
+        win.setTitle(`[${name}] ${win.webContents.getTitle()}`);
+    });
+    win.on("closed", () => accountWindows.delete(name));
+    setupZoom(win, name);
+
+    // Keep Discord links in the window, send everything else to the real browser
+    const isDiscord = (url: string) => {
+        try { return DISCORD_HOST.test(new URL(url).hostname); } catch { return false; }
+    };
+    win.webContents.setWindowOpenHandler(({ url }) => {
+        if (isDiscord(url)) win.loadURL(url);
+        else if (/^https?:/.test(url)) shell.openExternal(url);
+        return { action: "deny" };
+    });
+    win.webContents.on("will-navigate", (e, url) => {
+        if (!isDiscord(url)) {
+            e.preventDefault();
+            if (/^https?:/.test(url)) shell.openExternal(url);
+        }
+    });
+
+    win.loadURL("https://discord.com/app");
+    return { ok: true };
+}
+
+/*
+ * Zoom: the account window has no menu and none of Discord's desktop code, so nothing handles Ctrl +/-/0 or
+ * Ctrl+scroll. Do it here and remember the level per profile.
+ */
+const ZOOM_MIN = -3, ZOOM_MAX = 5, ZOOM_STEP = 0.5;
+
+function setupZoom(win: BrowserWindow, name: string) {
+    const wc = win.webContents;
+    const zoomFile = join(profileRoot(name), "zoom.json");
+    let level = 0;
+    try { level = Number(JSON.parse(readFileSync(zoomFile, "utf8")).level) || 0; } catch { }
+
+    const apply = (next: number) => {
+        level = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+        wc.setZoomLevel(level);
+        try {
+            mkdirSync(profileRoot(name), { recursive: true });
+            writeFileSync(zoomFile, JSON.stringify({ level }));
+        } catch { }
+    };
+
+    // Chromium resets zoom on navigation/reload, so reapply each time a page loads
+    wc.on("did-finish-load", () => wc.setZoomLevel(level));
+
+    wc.on("before-input-event", (e, input) => {
+        if (input.type !== "keyDown" || !(input.control || input.meta) || input.alt) return;
+        if (input.key === "=" || input.key === "+") apply(level + ZOOM_STEP);
+        else if (input.key === "-" || input.key === "_") apply(level - ZOOM_STEP);
+        else if (input.key === "0") apply(0);
+        else return;
+        e.preventDefault();
+    });
+
+    // Ctrl + mouse wheel / trackpad pinch
+    wc.on("zoom-changed", (_e, direction) => apply(level + (direction === "in" ? ZOOM_STEP : -ZOOM_STEP)));
 }
 
 export function getShortcutInfo(_: IpcMainInvokeEvent, name: string, lowMemory = true) {

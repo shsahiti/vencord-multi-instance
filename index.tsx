@@ -21,6 +21,11 @@ async function launch(name: string) {
     else showToast({ text: res.error ?? "Failed to launch", variant: "critical" });
 }
 
+async function openWindow(name: string) {
+    const res = await Native.openAccountWindow(name);
+    if (!res.ok) showToast({ text: res.error ?? "Failed to open", variant: "critical" });
+}
+
 async function copyShortcut(name: string) {
     await copyToClipboard(await Native.getShortcutInfo(name, settings.store.lowMemoryMode));
     showToast({ text: "Shortcut command copied", variant: "success" });
@@ -38,13 +43,17 @@ function ProfileLauncher() {
             <Paragraph>
                 This window is running {current ? <b>profile "{current}"</b> : <b>the default profile</b>}.
                 Each profile has its own login, so log into a different account in each one.
+                <b> Open</b> runs the account as a window inside this Discord (much less RAM);
+                <b> New instance</b> starts a whole separate Discord (full desktop features, more RAM).
+                The two keep separate logins.
             </Paragraph>
 
             {parseProfiles(profiles).map(name => (
                 <div key={name} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <Paragraph style={{ flex: 1 }}>{name}</Paragraph>
-                    <Button size="small" disabled={name === current} onClick={() => launch(name)}>
-                        {name === current ? "Running here" : "Launch"}
+                    <Button size="small" onClick={() => openWindow(name)}>Open</Button>
+                    <Button size="small" variant="secondary" disabled={name === current} onClick={() => launch(name)}>
+                        {name === current ? "Running here" : "New instance"}
                     </Button>
                     <Button size="small" variant="secondary" onClick={() => copyShortcut(name)}>
                         Copy shortcut
@@ -56,7 +65,8 @@ function ProfileLauncher() {
                 <div style={{ flex: 1 }}>
                     <TextInput placeholder="One-off profile name" value={custom} onChange={setCustom} />
                 </div>
-                <Button disabled={!custom.trim()} onClick={() => launch(custom)}>Launch</Button>
+                <Button disabled={!custom.trim()} onClick={() => openWindow(custom)}>Open</Button>
+                <Button variant="secondary" disabled={!custom.trim()} onClick={() => launch(custom)}>New instance</Button>
             </div>
         </div>
     );
