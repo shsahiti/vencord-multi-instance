@@ -139,6 +139,7 @@ export function openAccountWindow(_: IpcMainInvokeEvent, name: string) {
         backgroundColor: "#313338",
         webPreferences: {
             session: accountSession(name),
+            preload: getPreloadPath(),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: true,
@@ -183,29 +184,40 @@ const ZOOM_MIN = -3, ZOOM_MAX = 5, ZOOM_STEP = 0.5;
 
 /**
  * Discord's Electron (44) has no working native zoom on webContents (setZoomLevel is missing and the zoomLevel
- * setter throws), and whatever zoom we did get was being reset whenever the window lost focus: Discord rewrites
- * the <html> element's inline style on focus/blur, wiping an inline `zoom`, and native zoom gets reset too.
- * So zoom with a stylesheet injected through insertCSS instead. The page's own code can't touch it, and it
- * only goes away on a full navigation/reload, where did-finish-load puts it back.
+ * setter throws), and native zoom was being reset whenever the window lost focus.
+ *
+ * CSS `zoom` on <html> is NOT an option: Discord positions popouts (context menus, reaction/emoji pickers,
+ * tooltips) from mouse coordinates and getBoundingClientRect, which don't agree under CSS zoom, so every popup
+ * ends up in the wrong place or off-screen.
+ *
+ * Instead, a tiny preload zooms from inside the renderer with webFrame.setZoomFactor (real page zoom, same as
+ * Ctrl +/- in a browser, so layout and coordinates stay consistent) and re-applies it after focus/blur/navigation
+ * in case anything resets it.
  */
-const zoomCssKeys = new WeakMap<Electron.WebContents, string>();
+const ZOOM_CHANNEL = "vc-multi-instance-zoom";
+const PRELOAD_SRC = `
+const { ipcRenderer, webFrame } = require("electron");
+let factor = 1;
+const apply = () => { try { if (webFrame.getZoomFactor() !== factor) webFrame.setZoomFactor(factor); } catch {} };
+const applySoon = () => { apply(); setTimeout(apply, 0); setTimeout(apply, 100); };
+ipcRenderer.on(${JSON.stringify(ZOOM_CHANNEL)}, (_e, f) => { factor = Number(f) || 1; applySoon(); });
+for (const ev of ["focus", "blur", "resize", "DOMContentLoaded", "load"]) window.addEventListener(ev, applySoon, true);
+document.addEventListener("visibilitychange", applySoon);
+`;
 
-const zoomQueues = new WeakMap<Electron.WebContents, Promise<void>>();
+let preloadPath: string | null = null;
+function getPreloadPath() {
+    if (preloadPath) return preloadPath;
+    const dir = join(app.getPath("appData"), "DiscordProfiles");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "account-window-preload.js");
+    writeFileSync(path, PRELOAD_SRC);
+    return preloadPath = path;
+}
 
-// Queued per window so fast repeated Ctrl+= presses can't race and leave a stale stylesheet behind
 function setZoom(wc: Electron.WebContents, level: number) {
-    const run = async () => {
-        if (wc.isDestroyed()) return;
-        const factor = Math.pow(1.2, level);
-        const oldKey = zoomCssKeys.get(wc);
-        try {
-            const key = await wc.insertCSS(`html { zoom: ${factor} !important; }`);
-            zoomCssKeys.set(wc, key);
-            if (oldKey) await wc.removeInsertedCSS(oldKey);
-        } catch { }
-    };
-    const next = (zoomQueues.get(wc) ?? Promise.resolve()).then(run);
-    zoomQueues.set(wc, next);
+    if (wc.isDestroyed()) return;
+    wc.send(ZOOM_CHANNEL, Math.pow(1.2, level));
 }
 
 function setupZoom(win: BrowserWindow, name: string) {
@@ -223,11 +235,11 @@ function setupZoom(win: BrowserWindow, name: string) {
         } catch { }
     };
 
-    // Inserted CSS is dropped on navigation/reload, so reapply each time a page loads
-    wc.on("did-finish-load", () => {
-        zoomCssKeys.delete(wc);
-        setZoom(wc, level);
-    });
+    // The preload starts at 100% on every load, so tell it the level again; also nudge it on focus changes
+    wc.on("dom-ready", () => setZoom(wc, level));
+    wc.on("did-finish-load", () => setZoom(wc, level));
+    win.on("focus", () => setZoom(wc, level));
+    win.on("blur", () => setZoom(wc, level));
 
     wc.on("before-input-event", (e, input) => {
         if (input.type !== "keyDown" || !(input.control || input.meta) || input.alt) return;
