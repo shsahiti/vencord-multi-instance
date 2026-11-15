@@ -182,23 +182,30 @@ export function openAccountWindow(_: IpcMainInvokeEvent, name: string) {
 const ZOOM_MIN = -3, ZOOM_MAX = 5, ZOOM_STEP = 0.5;
 
 /**
- * Discord's Electron (44) has no working native zoom on webContents: setZoomLevel is missing and the zoomLevel
- * property setter just calls it and throws. Try the native methods defensively (an uncaught throw here pops a
- * main-process error dialog), otherwise use CSS zoom on the page, which works everywhere.
+ * Discord's Electron (44) has no working native zoom on webContents (setZoomLevel is missing and the zoomLevel
+ * setter throws), and whatever zoom we did get was being reset whenever the window lost focus: Discord rewrites
+ * the <html> element's inline style on focus/blur, wiping an inline `zoom`, and native zoom gets reset too.
+ * So zoom with a stylesheet injected through insertCSS instead. The page's own code can't touch it, and it
+ * only goes away on a full navigation/reload, where did-finish-load puts it back.
  */
-function setZoom(wc: Electron.WebContents, level: number) {
-    const anyWc = wc as any;
-    const factor = Math.pow(1.2, level);
-    const attempts: Array<() => void> = [
-        () => anyWc.setZoomLevel(level),
-        () => anyWc.setZoomFactor(factor)
-    ];
-    for (const attempt of attempts) {
-        try { attempt(); return; } catch { }
-    }
+const zoomCssKeys = new WeakMap<Electron.WebContents, string>();
 
-    if (wc.isDestroyed()) return;
-    wc.executeJavaScript(`document.documentElement.style.zoom = ${JSON.stringify(String(factor))}`).catch(() => { });
+const zoomQueues = new WeakMap<Electron.WebContents, Promise<void>>();
+
+// Queued per window so fast repeated Ctrl+= presses can't race and leave a stale stylesheet behind
+function setZoom(wc: Electron.WebContents, level: number) {
+    const run = async () => {
+        if (wc.isDestroyed()) return;
+        const factor = Math.pow(1.2, level);
+        const oldKey = zoomCssKeys.get(wc);
+        try {
+            const key = await wc.insertCSS(`html { zoom: ${factor} !important; }`);
+            zoomCssKeys.set(wc, key);
+            if (oldKey) await wc.removeInsertedCSS(oldKey);
+        } catch { }
+    };
+    const next = (zoomQueues.get(wc) ?? Promise.resolve()).then(run);
+    zoomQueues.set(wc, next);
 }
 
 function setupZoom(win: BrowserWindow, name: string) {
@@ -216,8 +223,11 @@ function setupZoom(win: BrowserWindow, name: string) {
         } catch { }
     };
 
-    // Chromium resets zoom on navigation/reload, so reapply each time a page loads
-    wc.on("did-finish-load", () => setZoom(wc, level));
+    // Inserted CSS is dropped on navigation/reload, so reapply each time a page loads
+    wc.on("did-finish-load", () => {
+        zoomCssKeys.delete(wc);
+        setZoom(wc, level);
+    });
 
     wc.on("before-input-event", (e, input) => {
         if (input.type !== "keyDown" || !(input.control || input.meta) || input.alt) return;
