@@ -31,7 +31,7 @@ An account window and a new instance for the same profile name keep **separate**
 
 ## Install
 
-User plugins must be built into Vencord from source:
+User plugins must be built into Vencord from source (needs Node.js 22+ and pnpm):
 
 ```sh
 git clone https://github.com/Vendicated/Vencord
@@ -55,3 +55,6 @@ Restart Discord and enable **MultiInstance** in Settings → Vencord → Plugins
 - Each window's title is prefixed with `[profile]` (toggleable for new instances).
 - To remove a profile, close it, then delete `%APPDATA%\DiscordProfiles\<name>` (new instance login and saved zoom)
   and `%APPDATA%\discord\Partitions\vc-account-<name>` (account window login).
+
+On Linux and macOS, `%APPDATA%` is `~/.config` and `~/Library/Application Support` respectively. On Linux,
+**Copy shortcut** gives `"~/.config/discord/Discord" --vc-profile=alt1`, which keeps working across Discord updates.

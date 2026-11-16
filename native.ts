@@ -12,7 +12,7 @@
 
 import { spawn } from "child_process";
 import { app, BrowserWindow, IpcMainInvokeEvent, session, shell } from "electron";
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, join, relative } from "path";
 
 const FLAG = "--vc-profile=";
@@ -260,6 +260,12 @@ export function getShortcutInfo(_: IpcMainInvokeEvent, name: string, lowMemory =
         // Discord.exe lives in app-<version>\, so point shortcuts at Update.exe to survive updates
         const updateExe = join(process.execPath, "..", "..", "Update.exe");
         return `"${updateExe}" --processStart Discord.exe --process-start-args "${args}"`;
+    }
+    // Linux: the binary lives in app-<version>/ too, but the updater keeps a ../Discord symlink pointing at the current one
+    const appDir = join(process.execPath, "..");
+    if (process.platform === "linux" && basename(appDir).startsWith("app-")) {
+        const host = join(appDir, "..", basename(process.execPath));
+        if (existsSync(host)) return `"${host}" ${args}`;
     }
     return `"${process.execPath}" ${args}`;
 }
